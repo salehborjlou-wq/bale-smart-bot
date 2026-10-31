@@ -30,6 +30,7 @@ HELP = (
     "/setstock شماره | موجودی\n"
     "/delproduct شماره\n"
     "/orders ← آخرین سفارش‌ها\n"
+    "/reply شناسه_مشتری پیام ← جواب دادن به مشتری\n"
     "/pause شناسه_مشتری ← توقف پاسخ خودکار\n"
     "/resume شناسه_مشتری ← فعال کردن دوباره"
 )
@@ -146,6 +147,17 @@ async def process_update(update):
         return
 
     is_admin = ADMIN_CHAT_ID and chat_id == str(ADMIN_CHAT_ID)
+
+    if is_admin and text.startswith("/reply"):
+        parts = text.split(maxsplit=2)
+        if len(parts) < 3:
+            await bale.send_message(chat_id, "فرمت: /reply شناسه_مشتری پیام")
+            return
+        await bale.send_message(parts[1], parts[2])
+        save_message(parts[1], "assistant", parts[2])
+        await bale.send_message(chat_id, "✅ پیام ارسال شد.")
+        return
+
     if is_admin and text.startswith("/") and text != "/start":
         answer = handle_admin(text)
         await bale.send_message(chat_id, answer)
@@ -171,7 +183,9 @@ async def handle_customer(chat_id, msg, text):
 
     if paused:
         await notify_admin(
-            f"💬 پیام از مشتری {chat_id}:\n{text}\n\nفعال کردن ربات: /resume {chat_id}"
+            f"💬 پیام از مشتری {chat_id}:\n{text}\n\n"
+            f"جواب دادن: /reply {chat_id} پیام\n"
+            f"فعال کردن ربات: /resume {chat_id}"
         )
         return
 
@@ -192,7 +206,9 @@ async def handle_customer(chat_id, msg, text):
         reply = (reply + "\n\nدرخواست شما به اپراتور ارجاع داده شد. به‌زودی پاسخ می‌دیم.").strip()
         await notify_admin(
             f"🙋 مشتری {chat_id} اپراتور انسانی خواست.\n"
-            f"آخرین پیام: {text}\n\nفعال کردن ربات: /resume {chat_id}"
+            f"آخرین پیام: {text}\n\n"
+            f"جواب دادن: /reply {chat_id} پیام\n"
+            f"فعال کردن ربات: /resume {chat_id}"
         )
 
     if not reply:
