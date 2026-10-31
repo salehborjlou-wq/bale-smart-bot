@@ -141,6 +141,10 @@ async def process_update(update):
         await bale.send_message(chat_id, "لطفاً پیامتون رو به صورت متن بفرستید.")
         return
 
+    if text == "/myid":
+        await bale.send_message(chat_id, f"شناسه شما: {chat_id}")
+        return
+
     is_admin = ADMIN_CHAT_ID and chat_id == str(ADMIN_CHAT_ID)
     if is_admin and text.startswith("/") and text != "/start":
         answer = handle_admin(text)
