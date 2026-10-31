@@ -4,14 +4,23 @@ from app.config import BALE_TOKEN
 BASE_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}"
 
 
-async def send_message(chat_id, text):
+async def send_message(chat_id, text, keyboard=None):
+    payload = {"chat_id": chat_id, "text": text}
+    if keyboard:
+        payload["reply_markup"] = {
+            "keyboard": [[{"text": b} for b in row] for row in keyboard],
+            "resize_keyboard": True,
+        }
     async with httpx.AsyncClient(timeout=20) as client:
         try:
-            r = await client.post(
-                f"{BASE_URL}/sendMessage",
-                json={"chat_id": chat_id, "text": text},
-            )
-            return r.json()
+            r = await client.post(f"{BASE_URL}/sendMessage", json=payload)
+            data = r.json()
+            if keyboard and not data.get("ok"):
+                print("keyboard failed:", data)
+                payload.pop("reply_markup")
+                r = await client.post(f"{BASE_URL}/sendMessage", json=payload)
+                data = r.json()
+            return data
         except Exception as e:
             print("send_message error:", e)
             return None
