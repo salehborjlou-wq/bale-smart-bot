@@ -200,6 +200,8 @@ async def handle_customer(chat_id, msg, text):
 
     save_message(chat_id, "assistant", reply)
     await bale.send_message(chat_id, reply)
+    if str(chat_id) != str(ADMIN_CHAT_ID):
+        await notify_admin(f"👤 مشتری {chat_id}:\n{text}\n\n🤖 ربات:\n{reply}")
 
 
 async def create_order(chat_id, data):
