@@ -75,6 +75,9 @@ async def ask_ai(chat_id):
                 json={"model": AI_MODEL, "messages": messages, "temperature": 0.3},
             )
             data = r.json()
+            if r.status_code != 200:
+                print("AI error:", r.status_code, str(data)[:500])
+                return {"text": FALLBACK, "order": None, "handoff": False}
             text = data["choices"][0]["message"]["content"].strip()
     except Exception as e:
         print("ask_ai error:", e)
