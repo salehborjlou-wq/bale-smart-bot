@@ -35,11 +35,40 @@ HELP = (
     "/resume شناسه_مشتری ← فعال کردن دوباره"
 )
 
+CUSTOMER_KB = [
+    ["🛍 محصولات", "🛒 ثبت سفارش"],
+    ["❓ سوالات متداول", "👤 ارتباط با اپراتور"],
+]
+
+ADMIN_KB = [
+    ["📦 محصولات", "🧾 سفارش‌ها"],
+    ["➕ افزودن محصول", "📖 راهنما"],
+]
+
+ADMIN_BUTTONS = {
+    "📦 محصولات": "/products",
+    "🧾 سفارش‌ها": "/orders",
+    "📖 راهنما": "/help",
+}
+
+CUSTOMER_BUTTON_TEXTS = {
+    "🛒 ثبت سفارش": "می‌خوام سفارش ثبت کنم",
+    "❓ سوالات متداول": "سوالات متداول فروشگاه چیه؟",
+}
+
 DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
 
 def to_int(value):
     return int(str(value).translate(DIGITS).replace(",", "").strip())
+
+
+def is_admin_chat(chat_id):
+    return bool(ADMIN_CHAT_ID) and str(chat_id) == str(ADMIN_CHAT_ID)
+
+
+def kb_for(chat_id):
+    return ADMIN_KB if is_admin_chat(chat_id) else CUSTOMER_KB
 
 
 @app.get("/")
@@ -125,7 +154,31 @@ def set_paused(chat_id, value):
 
 async def notify_admin(text):
     if ADMIN_CHAT_ID:
-        await bale.send_message(ADMIN_CHAT_ID, text)
+        await bale.send_message(ADMIN_CHAT_ID, text, keyboard=ADMIN_KB)
+
+
+def product_list_text():
+    db = SessionLocal()
+    try:
+        items = db.query(Product).filter(Product.active == True).all()
+        if not items:
+            return "فعلاً محصولی ثبت نشده است."
+        blocks = []
+        for p in items:
+            block = f"🛍 {p.name}\n💰 قیمت: {p.price} تومان\n📦 موجودی: {p.stock}"
+            if p.description:
+                block += f"\n📝 {p.description}"
+            blocks.append(block)
+        return "لیست محصولات:\n\n" + "\n\n".join(blocks)
+    finally:
+        db.close()
+
+
+async def send_reply(chat_id, user_text, reply):
+    save_message(chat_id, "assistant", reply)
+    await bale.send_message(chat_id, reply, keyboard=kb_for(chat_id))
+    if not is_admin_chat(chat_id):
+        await notify_admin(f"👤 مشتری {chat_id}:\n{user_text}\n\n🤖 ربات:\n{reply}")
 
 
 async def process_update(update):
@@ -139,30 +192,53 @@ async def process_update(update):
     chat_id = str(msg["chat"]["id"])
     text = (msg.get("text") or "").strip()
     if not text:
-        await bale.send_message(chat_id, "لطفاً پیامتون رو به صورت متن بفرستید.")
+        await bale.send_message(
+            chat_id, "لطفاً پیامتون رو به صورت متن بفرستید.", keyboard=kb_for(chat_id)
+        )
         return
 
     if text == "/myid":
         await bale.send_message(chat_id, f"شناسه شما: {chat_id}")
         return
 
-    is_admin = ADMIN_CHAT_ID and chat_id == str(ADMIN_CHAT_ID)
-
-    if is_admin and text.startswith("/reply"):
-        parts = text.split(maxsplit=2)
-        if len(parts) < 3:
-            await bale.send_message(chat_id, "فرمت: /reply شناسه_مشتری پیام")
+    if is_admin_chat(chat_id):
+        if text == "/start":
+            await bale.send_message(
+                chat_id,
+                "سلام مدیر 👋\nبا دکمه‌های پایین صفحه ربات رو مدیریت کن.",
+                keyboard=ADMIN_KB,
+            )
             return
-        await bale.send_message(parts[1], parts[2])
-        save_message(parts[1], "assistant", parts[2])
-        await bale.send_message(chat_id, "✅ پیام ارسال شد.")
-        return
 
-    if is_admin and text.startswith("/") and text != "/start":
-        answer = handle_admin(text)
-        await bale.send_message(chat_id, answer)
-        return
+        if text == "➕ افزودن محصول":
+            await bale.send_message(
+                chat_id,
+                "برای افزودن محصول، این قالب رو کپی کن، پر کن و بفرست:\n\n"
+                "/addproduct نام | قیمت | موجودی | توضیحات",
+                keyboard=ADMIN_KB,
+            )
+            return
 
+        text = ADMIN_BUTTONS.get(text, text)
+
+        if text.startswith("/reply"):
+            parts = text.split(maxsplit=2)
+            if len(parts) < 3:
+                await bale.send_message(
+                    chat_id, "فرمت: /reply شناسه_مشتری پیام", keyboard=ADMIN_KB
+                )
+                return
+            await bale.send_message(parts[1], parts[2], keyboard=CUSTOMER_KB)
+            save_message(parts[1], "assistant", parts[2])
+            await bale.send_message(chat_id, "✅ پیام ارسال شد.", keyboard=ADMIN_KB)
+            return
+
+        if text.startswith("/"):
+            answer = handle_admin(text)
+            await bale.send_message(chat_id, answer, keyboard=ADMIN_KB)
+            return
+
+    text = CUSTOMER_BUTTON_TEXTS.get(text, text)
     await handle_customer(chat_id, msg, text)
 
 
@@ -190,8 +266,23 @@ async def handle_customer(chat_id, msg, text):
         return
 
     if text == "/start":
-        save_message(chat_id, "assistant", WELCOME)
-        await bale.send_message(chat_id, WELCOME)
+        await send_reply(chat_id, text, WELCOME)
+        return
+
+    if text == "🛍 محصولات":
+        await send_reply(chat_id, text, product_list_text())
+        return
+
+    if text == "👤 ارتباط با اپراتور":
+        set_paused(chat_id, True)
+        reply = "درخواست شما به اپراتور ارجاع داده شد. به‌زودی پاسخ می‌دیم."
+        save_message(chat_id, "assistant", reply)
+        await bale.send_message(chat_id, reply, keyboard=kb_for(chat_id))
+        await notify_admin(
+            f"🙋 مشتری {chat_id} اپراتور انسانی خواست.\n\n"
+            f"جواب دادن: /reply {chat_id} پیام\n"
+            f"فعال کردن ربات: /resume {chat_id}"
+        )
         return
 
     result = await ask_ai(chat_id)
@@ -214,10 +305,7 @@ async def handle_customer(chat_id, msg, text):
     if not reply:
         reply = "متوجه نشدم، می‌تونید دوباره بنویسید؟"
 
-    save_message(chat_id, "assistant", reply)
-    await bale.send_message(chat_id, reply)
-    if str(chat_id) != str(ADMIN_CHAT_ID):
-        await notify_admin(f"👤 مشتری {chat_id}:\n{text}\n\n🤖 ربات:\n{reply}")
+    await send_reply(chat_id, text, reply)
 
 
 async def create_order(chat_id, data):
