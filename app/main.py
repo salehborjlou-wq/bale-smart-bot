@@ -30,6 +30,7 @@ HELP = (
     "/setstock شماره | موجودی\n"
     "/delproduct شماره\n"
     "/orders ← آخرین سفارش‌ها\n"
+    "/customers ← آخرین مشتری‌ها\n"
     "/reply شناسه_مشتری پیام ← جواب دادن به مشتری\n"
     "/pause شناسه_مشتری ← توقف پاسخ خودکار\n"
     "/resume شناسه_مشتری ← فعال کردن دوباره"
@@ -42,13 +43,53 @@ CUSTOMER_KB = [
 
 ADMIN_KB = [
     ["📦 محصولات", "🧾 سفارش‌ها"],
-    ["➕ افزودن محصول", "📖 راهنما"],
+    ["👥 مشتریان", "💬 پاسخ به مشتری"],
+    ["➕ افزودن محصول", "💰 تغییر قیمت"],
+    ["📊 تغییر موجودی", "❌ حذف محصول"],
+    ["🔕 توقف ربات", "🔔 فعال‌سازی ربات"],
+    ["📖 راهنما"],
 ]
 
 ADMIN_BUTTONS = {
     "📦 محصولات": "/products",
     "🧾 سفارش‌ها": "/orders",
+    "👥 مشتریان": "/customers",
     "📖 راهنما": "/help",
+}
+
+ADMIN_TEMPLATES = {
+    "💬 پاسخ به مشتری": (
+        "برای جواب دادن به مشتری، این قالب رو کپی کن، پر کن و بفرست:\n\n"
+        "/reply شناسه_مشتری پیام\n\n"
+        "شناسه‌ی مشتری رو از دکمه‌ی «👥 مشتریان» یا از پیام‌های رسیده بردار."
+    ),
+    "➕ افزودن محصول": (
+        "برای افزودن محصول، این قالب رو کپی کن، پر کن و بفرست:\n\n"
+        "/addproduct نام | قیمت | موجودی | توضیحات"
+    ),
+    "💰 تغییر قیمت": (
+        "برای تغییر قیمت، این قالب رو کپی کن، پر کن و بفرست:\n\n"
+        "/setprice شماره | قیمت\n\n"
+        "شماره‌ی محصول رو از دکمه‌ی «📦 محصولات» ببین."
+    ),
+    "📊 تغییر موجودی": (
+        "برای تغییر موجودی، این قالب رو کپی کن، پر کن و بفرست:\n\n"
+        "/setstock شماره | موجودی\n\n"
+        "شماره‌ی محصول رو از دکمه‌ی «📦 محصولات» ببین."
+    ),
+    "❌ حذف محصول": (
+        "برای حذف محصول، این قالب رو کپی کن، پر کن و بفرست:\n\n"
+        "/delproduct شماره\n\n"
+        "شماره‌ی محصول رو از دکمه‌ی «📦 محصولات» ببین."
+    ),
+    "🔕 توقف ربات": (
+        "برای توقف پاسخ خودکار برای یک مشتری، این رو کپی کن، پر کن و بفرست:\n\n"
+        "/pause شناسه_مشتری"
+    ),
+    "🔔 فعال‌سازی ربات": (
+        "برای فعال کردن دوباره‌ی پاسخ خودکار برای یک مشتری، این رو کپی کن، پر کن و بفرست:\n\n"
+        "/resume شناسه_مشتری"
+    ),
 }
 
 CUSTOMER_BUTTON_TEXTS = {
@@ -210,13 +251,8 @@ async def process_update(update):
             )
             return
 
-        if text == "➕ افزودن محصول":
-            await bale.send_message(
-                chat_id,
-                "برای افزودن محصول، این قالب رو کپی کن، پر کن و بفرست:\n\n"
-                "/addproduct نام | قیمت | موجودی | توضیحات",
-                keyboard=ADMIN_KB,
-            )
+        if text in ADMIN_TEMPLATES:
+            await bale.send_message(chat_id, ADMIN_TEMPLATES[text], keyboard=ADMIN_KB)
             return
 
         text = ADMIN_BUTTONS.get(text, text)
@@ -456,6 +492,16 @@ def handle_admin(text):
                 f"{o.product_name} × {o.quantity} | {o.total_price} تومان"
                 for o in items
             )
+
+        if cmd == "/customers":
+            items = db.query(Customer).order_by(Customer.id.desc()).limit(15).all()
+            if not items:
+                return "هنوز مشتری‌ای ثبت نشده."
+            lines = []
+            for c in items:
+                mark = " 🔕" if c.bot_paused else ""
+                lines.append(f"{c.chat_id} | {c.name or '-'} | {c.phone or '-'}{mark}")
+            return "آخرین مشتری‌ها (🔕 یعنی ربات متوقف شده):\n\n" + "\n".join(lines)
 
         if cmd in ("/pause", "/resume"):
             ok = set_paused(arg.strip(), cmd == "/pause")
