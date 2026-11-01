@@ -540,6 +540,11 @@ async def process_update(update):
             await bale.send_message(chat_id, answer, keyboard=ADMIN_KB)
             return
 
+        await bale.send_message(
+            chat_id, "از دکمه‌های منوی پایین استفاده کن 👇", keyboard=ADMIN_KB
+        )
+        return
+
     text = CUSTOMER_BUTTON_TEXTS.get(text, text)
     await handle_customer(chat_id, msg, text)
 
