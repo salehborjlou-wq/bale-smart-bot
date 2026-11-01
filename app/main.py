@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import os
+import re
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
@@ -23,17 +24,13 @@ WELCOME = os.getenv(
 )
 
 HELP = (
-    "دستورات مدیر:\n"
-    "/products ← لیست محصولات\n"
-    "/addproduct نام | قیمت | موجودی | توضیحات\n"
-    "/setprice شماره | قیمت\n"
-    "/setstock شماره | موجودی\n"
-    "/delproduct شماره\n"
-    "/orders ← آخرین سفارش‌ها\n"
-    "/customers ← آخرین مشتری‌ها\n"
-    "/reply شناسه_مشتری پیام ← جواب دادن به مشتری\n"
-    "/pause شناسه_مشتری ← توقف پاسخ خودکار\n"
-    "/resume شناسه_مشتری ← فعال کردن دوباره"
+    "راهنمای مدیر:\n\n"
+    "💬 پاسخ به مشتری: مشتری رو انتخاب کن و پیامت رو بنویس.\n"
+    "↩️ یا هر پیام رسیده از مشتری رو ریپلای کن و جوابت رو بنویس.\n"
+    "➕ افزودن محصول، 💰 قیمت، 📊 موجودی، ❌ حذف: ربات مرحله‌به‌مرحله ازت می‌پرسه.\n"
+    "🔕 / 🔔 توقف و فعال‌سازی پاسخ خودکار برای یک مشتری.\n"
+    "👥 مشتریان و 🧾 سفارش‌ها: لیست‌ها.\n"
+    "🔙 انصراف: برگشت به منوی اصلی."
 )
 
 CUSTOMER_KB = [
@@ -50,6 +47,8 @@ ADMIN_KB = [
     ["📖 راهنما"],
 ]
 
+MENU_TEXTS = set(b for row in ADMIN_KB for b in row)
+
 ADMIN_BUTTONS = {
     "📦 محصولات": "/products",
     "🧾 سفارش‌ها": "/orders",
@@ -57,45 +56,19 @@ ADMIN_BUTTONS = {
     "📖 راهنما": "/help",
 }
 
-ADMIN_TEMPLATES = {
-    "💬 پاسخ به مشتری": (
-        "برای جواب دادن به مشتری، این قالب رو کپی کن، پر کن و بفرست:\n\n"
-        "/reply شناسه_مشتری پیام\n\n"
-        "شناسه‌ی مشتری رو از دکمه‌ی «👥 مشتریان» یا از پیام‌های رسیده بردار."
-    ),
-    "➕ افزودن محصول": (
-        "برای افزودن محصول، این قالب رو کپی کن، پر کن و بفرست:\n\n"
-        "/addproduct نام | قیمت | موجودی | توضیحات"
-    ),
-    "💰 تغییر قیمت": (
-        "برای تغییر قیمت، این قالب رو کپی کن، پر کن و بفرست:\n\n"
-        "/setprice شماره | قیمت\n\n"
-        "شماره‌ی محصول رو از دکمه‌ی «📦 محصولات» ببین."
-    ),
-    "📊 تغییر موجودی": (
-        "برای تغییر موجودی، این قالب رو کپی کن، پر کن و بفرست:\n\n"
-        "/setstock شماره | موجودی\n\n"
-        "شماره‌ی محصول رو از دکمه‌ی «📦 محصولات» ببین."
-    ),
-    "❌ حذف محصول": (
-        "برای حذف محصول، این قالب رو کپی کن، پر کن و بفرست:\n\n"
-        "/delproduct شماره\n\n"
-        "شماره‌ی محصول رو از دکمه‌ی «📦 محصولات» ببین."
-    ),
-    "🔕 توقف ربات": (
-        "برای توقف پاسخ خودکار برای یک مشتری، این رو کپی کن، پر کن و بفرست:\n\n"
-        "/pause شناسه_مشتری"
-    ),
-    "🔔 فعال‌سازی ربات": (
-        "برای فعال کردن دوباره‌ی پاسخ خودکار برای یک مشتری، این رو کپی کن، پر کن و بفرست:\n\n"
-        "/resume شناسه_مشتری"
-    ),
-}
-
 CUSTOMER_BUTTON_TEXTS = {
     "🛒 ثبت سفارش": "می‌خوام سفارش ثبت کنم",
     "❓ سوالات متداول": "سوالات متداول فروشگاه چیه؟",
 }
+
+CANCEL = "🔙 انصراف"
+END_CHAT = "🔙 پایان گفتگو"
+SKIP = "⏭ بدون توضیحات"
+CONFIRM_DEL = "✅ بله، حذف شود"
+
+REPLY_HINT = "↩️ برای جواب دادن، همین پیام رو ریپلای کن و جوابت رو بنویس."
+
+ADMIN_STATE = {}
 
 DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
@@ -195,7 +168,81 @@ def set_paused(chat_id, value):
 
 async def notify_admin(text):
     if ADMIN_CHAT_ID:
-        await bale.send_message(ADMIN_CHAT_ID, text, keyboard=ADMIN_KB)
+        busy = ADMIN_STATE.get(str(ADMIN_CHAT_ID))
+        await bale.send_message(
+            ADMIN_CHAT_ID, text, keyboard=None if busy else ADMIN_KB
+        )
+
+
+def list_customers(limit=8):
+    db = SessionLocal()
+    try:
+        q = db.query(Customer)
+        if ADMIN_CHAT_ID:
+            q = q.filter(Customer.chat_id != str(ADMIN_CHAT_ID))
+        items = q.order_by(Customer.id.desc()).limit(limit).all()
+        return [(c.chat_id, c.name or "-") for c in items]
+    finally:
+        db.close()
+
+
+def customers_rows():
+    rows = [[f"👤 {name} | {cid}"] for cid, name in list_customers()]
+    rows.append([CANCEL])
+    return rows
+
+
+def list_products():
+    db = SessionLocal()
+    try:
+        items = db.query(Product).filter(Product.active == True).all()
+        return [(p.id, p.name) for p in items]
+    finally:
+        db.close()
+
+
+def products_rows():
+    rows = [[f"{pid}) {name}"] for pid, name in list_products()]
+    rows.append([CANCEL])
+    return rows
+
+
+def get_product_name(pid):
+    db = SessionLocal()
+    try:
+        p = db.query(Product).filter(Product.id == pid, Product.active == True).first()
+        return p.name if p else None
+    finally:
+        db.close()
+
+
+def update_product(pid, field, value):
+    db = SessionLocal()
+    try:
+        p = db.query(Product).filter(Product.id == pid).first()
+        if not p:
+            return False
+        if field == "price":
+            p.price = value
+        elif field == "stock":
+            p.stock = value
+        elif field == "delete":
+            p.active = False
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+def create_product(name, price, stock, description):
+    db = SessionLocal()
+    try:
+        p = Product(name=name, price=price, stock=stock, description=description)
+        db.add(p)
+        db.commit()
+        return p.id
+    finally:
+        db.close()
 
 
 def product_list_text():
@@ -219,7 +266,239 @@ async def send_reply(chat_id, user_text, reply):
     save_message(chat_id, "assistant", reply)
     await bale.send_message(chat_id, reply, keyboard=kb_for(chat_id))
     if not is_admin_chat(chat_id):
-        await notify_admin(f"👤 مشتری {chat_id}:\n{user_text}\n\n🤖 ربات:\n{reply}")
+        await notify_admin(
+            f"👤 مشتری {chat_id}:\n{user_text}\n\n🤖 ربات:\n{reply}\n\n{REPLY_HINT}"
+        )
+
+
+async def send_to_customer(admin_id, cid, text, keyboard=None, note=""):
+    await bale.send_message(cid, text, keyboard=CUSTOMER_KB)
+    save_message(cid, "assistant", text)
+    set_paused(cid, True)
+    await bale.send_message(admin_id, "✅ ارسال شد." + note, keyboard=keyboard)
+
+
+async def admin_flow(chat_id, text, msg):
+    state = ADMIN_STATE.get(chat_id)
+
+    reply_to = msg.get("reply_to_message") or {}
+    if reply_to and not text.startswith("/") and text not in MENU_TEXTS:
+        m = re.search(r"مشتری[\s:]+(\d{5,})", reply_to.get("text") or "")
+        if m:
+            await send_to_customer(
+                chat_id,
+                m.group(1),
+                text,
+                note="\n(ربات برای این مشتری متوقف شد. با «🔔 فعال‌سازی ربات» دوباره فعالش کن.)",
+            )
+            return True
+
+    if text.startswith("/") and state and state["step"] != "reply_text":
+        ADMIN_STATE.pop(chat_id, None)
+        state = None
+
+    if text in (CANCEL, END_CHAT):
+        out = "باشه، به منوی اصلی برگشتیم."
+        if state and state["step"] == "reply_text" and text == END_CHAT:
+            set_paused(state["data"]["cid"], False)
+            out = "گفتگو تموم شد و ربات برای این مشتری دوباره فعال شد."
+        ADMIN_STATE.pop(chat_id, None)
+        await bale.send_message(chat_id, out, keyboard=ADMIN_KB)
+        return True
+
+    if text == "/start":
+        ADMIN_STATE.pop(chat_id, None)
+        await bale.send_message(
+            chat_id,
+            "سلام مدیر 👋\nبا دکمه‌های پایین صفحه ربات رو مدیریت کن.",
+            keyboard=ADMIN_KB,
+        )
+        return True
+
+    if text in ADMIN_BUTTONS:
+        ADMIN_STATE.pop(chat_id, None)
+        answer = handle_admin(ADMIN_BUTTONS[text])
+        await bale.send_message(chat_id, answer, keyboard=ADMIN_KB)
+        return True
+
+    if text == "💬 پاسخ به مشتری":
+        if not list_customers():
+            await bale.send_message(chat_id, "هنوز مشتری‌ای پیام نداده.", keyboard=ADMIN_KB)
+            return True
+        ADMIN_STATE[chat_id] = {"step": "reply_pick", "data": {}}
+        await bale.send_message(
+            chat_id, "به کدوم مشتری جواب بدی؟ یکی رو انتخاب کن:", keyboard=customers_rows()
+        )
+        return True
+
+    if text in ("🔕 توقف ربات", "🔔 فعال‌سازی ربات"):
+        if not list_customers():
+            await bale.send_message(chat_id, "هنوز مشتری‌ای پیام نداده.", keyboard=ADMIN_KB)
+            return True
+        ADMIN_STATE[chat_id] = {
+            "step": "toggle_pick",
+            "data": {"value": text == "🔕 توقف ربات"},
+        }
+        await bale.send_message(
+            chat_id, "کدوم مشتری؟ یکی رو انتخاب کن:", keyboard=customers_rows()
+        )
+        return True
+
+    if text == "➕ افزودن محصول":
+        ADMIN_STATE[chat_id] = {"step": "add_name", "data": {}}
+        await bale.send_message(chat_id, "اسم محصول چیه؟", keyboard=[[CANCEL]])
+        return True
+
+    if text in ("💰 تغییر قیمت", "📊 تغییر موجودی", "❌ حذف محصول"):
+        if not list_products():
+            await bale.send_message(chat_id, "هنوز محصولی ثبت نشده.", keyboard=ADMIN_KB)
+            return True
+        actions = {
+            "💰 تغییر قیمت": "price",
+            "📊 تغییر موجودی": "stock",
+            "❌ حذف محصول": "delete",
+        }
+        ADMIN_STATE[chat_id] = {"step": "product_pick", "data": {"action": actions[text]}}
+        await bale.send_message(chat_id, "کدوم محصول؟", keyboard=products_rows())
+        return True
+
+    if not state:
+        return False
+
+    step = state["step"]
+    data = state["data"]
+
+    if step == "reply_pick":
+        cid = text.split("|")[-1].strip()
+        if not cid.isdigit():
+            await bale.send_message(chat_id, "لطفاً یکی از دکمه‌های مشتری رو بزن.")
+            return True
+        set_paused(cid, True)
+        ADMIN_STATE[chat_id] = {"step": "reply_text", "data": {"cid": cid}}
+        await bale.send_message(
+            chat_id,
+            f"✍️ پیامت رو برای مشتری {cid} بنویس.\n"
+            "هر پیامی بنویسی برای اون ارسال می‌شه و ربات تا پایان گفتگو ساکت می‌مونه.",
+            keyboard=[[END_CHAT]],
+        )
+        return True
+
+    if step == "reply_text":
+        await send_to_customer(chat_id, data["cid"], text, keyboard=[[END_CHAT]])
+        return True
+
+    if step == "toggle_pick":
+        cid = text.split("|")[-1].strip()
+        if not cid.isdigit():
+            await bale.send_message(chat_id, "لطفاً یکی از دکمه‌های مشتری رو بزن.")
+            return True
+        ok = set_paused(cid, data["value"])
+        ADMIN_STATE.pop(chat_id, None)
+        if not ok:
+            out = "مشتری پیدا نشد."
+        elif data["value"]:
+            out = "✅ ربات برای این مشتری متوقف شد."
+        else:
+            out = "✅ ربات برای این مشتری فعال شد."
+        await bale.send_message(chat_id, out, keyboard=ADMIN_KB)
+        return True
+
+    if step == "add_name":
+        data["name"] = text
+        state["step"] = "add_price"
+        await bale.send_message(
+            chat_id, "قیمت چقدره؟ (تومان، فقط عدد)", keyboard=[[CANCEL]]
+        )
+        return True
+
+    if step == "add_price":
+        try:
+            data["price"] = to_int(text)
+        except Exception:
+            await bale.send_message(chat_id, "فقط عدد بنویس. مثلاً 450000")
+            return True
+        state["step"] = "add_stock"
+        await bale.send_message(chat_id, "موجودی چنده؟ (فقط عدد)", keyboard=[[CANCEL]])
+        return True
+
+    if step == "add_stock":
+        try:
+            data["stock"] = to_int(text)
+        except Exception:
+            await bale.send_message(chat_id, "فقط عدد بنویس. مثلاً 10")
+            return True
+        state["step"] = "add_desc"
+        await bale.send_message(
+            chat_id,
+            "توضیحات محصول رو بنویس، یا دکمه‌ی «بدون توضیحات» رو بزن:",
+            keyboard=[[SKIP], [CANCEL]],
+        )
+        return True
+
+    if step == "add_desc":
+        desc = "" if text == SKIP else text
+        pid = create_product(data["name"], data["price"], data["stock"], desc)
+        ADMIN_STATE.pop(chat_id, None)
+        await bale.send_message(
+            chat_id,
+            f"✅ محصول «{data['name']}» اضافه شد (شماره {pid}).",
+            keyboard=ADMIN_KB,
+        )
+        return True
+
+    if step == "product_pick":
+        try:
+            pid = to_int(text.split(")")[0])
+        except Exception:
+            await bale.send_message(chat_id, "لطفاً یکی از دکمه‌های محصول رو بزن.")
+            return True
+        name = get_product_name(pid)
+        if not name:
+            await bale.send_message(chat_id, "این محصول پیدا نشد. یکی از دکمه‌ها رو بزن.")
+            return True
+        action = data["action"]
+        if action == "delete":
+            ADMIN_STATE[chat_id] = {"step": "del_confirm", "data": {"pid": pid}}
+            await bale.send_message(
+                chat_id, f"مطمئنی «{name}» حذف بشه؟", keyboard=[[CONFIRM_DEL], [CANCEL]]
+            )
+        else:
+            ADMIN_STATE[chat_id] = {
+                "step": "edit_value",
+                "data": {"pid": pid, "field": action},
+            }
+            label = "قیمت جدید (تومان)" if action == "price" else "موجودی جدید"
+            await bale.send_message(
+                chat_id, f"{label} «{name}» رو بنویس (فقط عدد):", keyboard=[[CANCEL]]
+            )
+        return True
+
+    if step == "edit_value":
+        try:
+            value = to_int(text)
+        except Exception:
+            await bale.send_message(chat_id, "فقط عدد بنویس.")
+            return True
+        ok = update_product(data["pid"], data["field"], value)
+        ADMIN_STATE.pop(chat_id, None)
+        await bale.send_message(
+            chat_id, "✅ انجام شد." if ok else "محصول پیدا نشد.", keyboard=ADMIN_KB
+        )
+        return True
+
+    if step == "del_confirm":
+        if text == CONFIRM_DEL:
+            update_product(data["pid"], "delete", 0)
+            ADMIN_STATE.pop(chat_id, None)
+            await bale.send_message(chat_id, "✅ محصول حذف شد.", keyboard=ADMIN_KB)
+        else:
+            await bale.send_message(
+                chat_id, "برای حذف دکمه‌ی «بله، حذف شود» رو بزن، یا انصراف."
+            )
+        return True
+
+    ADMIN_STATE.pop(chat_id, None)
+    return False
 
 
 async def process_update(update):
@@ -243,19 +522,8 @@ async def process_update(update):
         return
 
     if is_admin_chat(chat_id):
-        if text == "/start":
-            await bale.send_message(
-                chat_id,
-                "سلام مدیر 👋\nبا دکمه‌های پایین صفحه ربات رو مدیریت کن.",
-                keyboard=ADMIN_KB,
-            )
+        if await admin_flow(chat_id, text, msg):
             return
-
-        if text in ADMIN_TEMPLATES:
-            await bale.send_message(chat_id, ADMIN_TEMPLATES[text], keyboard=ADMIN_KB)
-            return
-
-        text = ADMIN_BUTTONS.get(text, text)
 
         if text.startswith("/reply"):
             parts = text.split(maxsplit=2)
@@ -264,9 +532,7 @@ async def process_update(update):
                     chat_id, "فرمت: /reply شناسه_مشتری پیام", keyboard=ADMIN_KB
                 )
                 return
-            await bale.send_message(parts[1], parts[2], keyboard=CUSTOMER_KB)
-            save_message(parts[1], "assistant", parts[2])
-            await bale.send_message(chat_id, "✅ پیام ارسال شد.", keyboard=ADMIN_KB)
+            await send_to_customer(chat_id, parts[1], parts[2], keyboard=ADMIN_KB)
             return
 
         if text.startswith("/"):
@@ -294,11 +560,7 @@ async def handle_customer(chat_id, msg, text):
         db.close()
 
     if paused:
-        await notify_admin(
-            f"💬 پیام از مشتری {chat_id}:\n{text}\n\n"
-            f"جواب دادن: /reply {chat_id} پیام\n"
-            f"فعال کردن ربات: /resume {chat_id}"
-        )
+        await notify_admin(f"💬 پیام از مشتری {chat_id}:\n{text}\n\n{REPLY_HINT}")
         return
 
     if text == "/start":
@@ -315,9 +577,7 @@ async def handle_customer(chat_id, msg, text):
         save_message(chat_id, "assistant", reply)
         await bale.send_message(chat_id, reply, keyboard=kb_for(chat_id))
         await notify_admin(
-            f"🙋 مشتری {chat_id} اپراتور انسانی خواست.\n\n"
-            f"جواب دادن: /reply {chat_id} پیام\n"
-            f"فعال کردن ربات: /resume {chat_id}"
+            f"🙋 مشتری {chat_id} اپراتور انسانی خواست.\n\n{REPLY_HINT}"
         )
         return
 
@@ -333,9 +593,7 @@ async def handle_customer(chat_id, msg, text):
         reply = (reply + "\n\nدرخواست شما به اپراتور ارجاع داده شد. به‌زودی پاسخ می‌دیم.").strip()
         await notify_admin(
             f"🙋 مشتری {chat_id} اپراتور انسانی خواست.\n"
-            f"آخرین پیام: {text}\n\n"
-            f"جواب دادن: /reply {chat_id} پیام\n"
-            f"فعال کردن ربات: /resume {chat_id}"
+            f"آخرین پیام: {text}\n\n{REPLY_HINT}"
         )
 
     if not reply:
@@ -494,7 +752,10 @@ def handle_admin(text):
             )
 
         if cmd == "/customers":
-            items = db.query(Customer).order_by(Customer.id.desc()).limit(15).all()
+            q = db.query(Customer)
+            if ADMIN_CHAT_ID:
+                q = q.filter(Customer.chat_id != str(ADMIN_CHAT_ID))
+            items = q.order_by(Customer.id.desc()).limit(15).all()
             if not items:
                 return "هنوز مشتری‌ای ثبت نشده."
             lines = []
